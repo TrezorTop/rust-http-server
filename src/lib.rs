@@ -3,7 +3,7 @@ use std::thread;
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
+    sender: Option<mpsc::Sender<Job>>,
 }
 
 // This is a boxed (heap-allocated) trait object. It represents a function pointer or closure that:
@@ -40,7 +40,10 @@ impl ThreadPool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        ThreadPool { workers, sender }
+        ThreadPool {
+            workers,
+            sender: Some(sender),
+        }
     }
 
     pub fn execute<F>(&self, func: F)
@@ -49,13 +52,29 @@ impl ThreadPool {
     {
         let job = Box::new(func);
 
-        self.sender.send(job).unwrap();
+        self.sender.as_ref().unwrap().send(job).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        // Dropping sender closes the channel, which indicates no more messages will be sent.
+        // When that happens, all the calls to recv that the workers do in the infinite loop will return an error
+        drop(self.sender.take());
+
+        for worker in &mut self.workers {
+            println!("Shutting down thread, id: {}", worker.id);
+
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
     }
 }
 
 struct Worker {
     id: usize,
-    thread: thread::JoinHandle<()>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -67,17 +86,25 @@ impl Worker {
         let thread = thread::spawn(move || loop {
             // we first call lock on the receiver to acquire the mutex
             // if then we get the lock on the mutex, we call recv to receive a Job from the channel
-            // this works with `let`, because any temporary values used in the expression 
+            // this works with `let`, because any temporary values used in the expression
             // on the right hand side of the equals sign are immediately dropped when the let statement ends
-            // however, `while let` (and `if let` and `match`) does not drop temporary values until the end of the associated block.
-            let job = receiver.lock().unwrap().recv().unwrap();
+            let job = receiver.lock().unwrap().recv();
 
-            println!("Worker {id} got a job; executing.");
-
-            // calling the given function
-            job();
+            match job {
+                Ok(job) => {
+                    println!("Worker {id} got a job; executing.");
+                    job();
+                }
+                Err(_) => {
+                    println!("Worker {id} disconnected; shutting down.");
+                    break;
+                }
+            }
         });
 
-        Worker { id, thread }
+        Worker {
+            id,
+            thread: Some(thread),
+        }
     }
 }

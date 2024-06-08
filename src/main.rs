@@ -11,7 +11,7 @@ fn main() {
     let thread_pool = ThreadPool::new(10);
 
     // iterate over the connection attempts (hence this is Result<>)
-    for stream in listener.incoming() {
+    for stream in listener.incoming().take(2) {
         let stream = stream.unwrap();
 
         thread_pool.execute(|| {
